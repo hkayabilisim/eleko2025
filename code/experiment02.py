@@ -15,9 +15,9 @@ STATE_KEYS = ['num_containers', 'arrival_rate', 'avg_cpu_util']
 # DQN'in replay memory'si için transition tanımı
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
 # Episode sayisi
-NUM_EPISODES = 30
+NUM_EPISODES = 100
 # Step sayisi
-NUM_STEPS = 8
+NUM_STEPS = 16
 # Tekrarlanabilirlik için random seed
 RANDOM_SEED = 42
 # Container sayisi, min, max, ve initial
@@ -43,7 +43,7 @@ EPS_START = 0.9
 EPS_END = 0.05
 EPS_DECAY = 200
 # Kaç episode'da bir target network'ü policy network ile aynı yapalım.
-TARGET_UPDATE = 1
+TARGET_UPDATE = 20
 
 def action_tensor_to_dict(action: torch.Tensor) -> Dict:
     '''Network'den tensor olarak çıkan sıfır indeksli aksiyonu dict'e çeviriyoruz.'''
@@ -213,6 +213,9 @@ class DQN:
         return loss.item()
 
     def train(self, num_episodes, num_steps):
+        rewards = np.zeros((num_episodes, num_steps))
+        losses = np.zeros((num_episodes, num_steps))
+
         for episode in range(num_episodes):
             state = self.env.reset()
 
@@ -239,6 +242,8 @@ class DQN:
 
                 # Diagnostic amaçlı çeşitli bilgileri yazdırıyoruz.
                 print_step_info(episode, step, state, action_to_execute, next_state, reward, loss, exploration)
+                rewards[episode, step] = reward
+                losses[episode, step] = loss
 
                 # next_state bir sonraki adımın state'i olacak. O anlamda state'e aslında action
                 # almadan önceki state diyebiliriz.
@@ -247,7 +252,7 @@ class DQN:
             # Target network'ü policy network ile aynı yapıyoruz.
             if episode % TARGET_UPDATE == 0:
                 self.target_net.load_state_dict(self.policy_net.state_dict())
-
+        return {'rewards': rewards, 'losses': losses}
 
 class RLEnvironment:
 
@@ -302,6 +307,41 @@ class RLEnvironment:
 
         return state, reward, done
 
+def plot_history(history):
+    import matplotlib.pyplot as plt
+    num_episodes = history['rewards'].shape [0]
+
+    episode_rewards =np.mean(history['rewards'], axis=1)
+    smoothed_episode_rewards = np.zeros_like(episode_rewards)
+    for i in range(num_episodes):
+        start_idx = max(0, i - 10)
+        smoothed_episode_rewards[i] = np.nanmean(episode_rewards[start_idx:i+1])
+    
+    episode_losses = np.mean(history['losses'], axis=1)
+    smoothed_episode_losses = np.zeros_like(episode_losses)
+    for i in range(num_episodes):
+        start_idx = max(0, i - 10)
+        smoothed_episode_losses[i] = np.mean(episode_losses[start_idx:i+1])
+
+    fig, axes = plt.subplots(nrows=2, ncols=1, sharex=True)
+
+    ax1, ax2 = axes.flatten()
+
+    color = 'tab:red'
+    ax1.set_xlabel('episode')
+    ax1.set_ylabel('reward', color=color)
+    ax1.plot(episode_rewards, color=color)
+    ax1.plot(smoothed_episode_rewards, '--', color=color)
+    ax1.tick_params(axis='y', labelcolor=color)
+
+    color = 'tab:blue'
+    ax2.set_ylabel('loss', color=color)  # we already handled the x-label with ax1
+    ax2.plot(episode_losses, color=color)
+    ax2.plot(smoothed_episode_losses, '--', color=color)
+    ax2.tick_params(axis='y', labelcolor=color)
+
+    fig.tight_layout()  # otherwise the right y-label is slightly clipped
+    plt.show()
 
 if __name__ == "__main__":
     '''Ana programımız budur.'''
@@ -314,7 +354,9 @@ if __name__ == "__main__":
 
     agent = DQN(env, NUM_STATES, NUM_ACTIONS)
 
-    agent.train(NUM_EPISODES, NUM_STEPS)
+    history = agent.train(NUM_EPISODES, NUM_STEPS)
+
+    plot_history(history)
 
     print('Bitti!')
     print(f'"action" sütunu {MIN_NUM_CONTAINERS} sayısına yakınsamış olmalı!')
