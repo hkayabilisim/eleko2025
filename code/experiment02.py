@@ -331,13 +331,13 @@ def plot_history(history):
     ax1.set_xlabel('episode')
     ax1.set_ylabel('reward', color=color)
     ax1.plot(episode_rewards, color=color)
-    ax1.plot(smoothed_episode_rewards, '--', color=color)
+    ax1.plot(smoothed_episode_rewards, '-', color='black')
     ax1.tick_params(axis='y', labelcolor=color)
 
     color = 'tab:blue'
     ax2.set_ylabel('loss', color=color)  # we already handled the x-label with ax1
     ax2.plot(episode_losses, color=color)
-    ax2.plot(smoothed_episode_losses, '--', color=color)
+    ax2.plot(smoothed_episode_losses, '-', color='black')
     ax2.tick_params(axis='y', labelcolor=color)
 
     fig.tight_layout()  # otherwise the right y-label is slightly clipped
