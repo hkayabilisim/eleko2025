@@ -43,13 +43,15 @@ print(f'Preparing experiment03 data...fixing a specific cpu and varying expected
 df_experiment03 = df.copy()
 df_experiment03["previous_expected_tps"] = df_experiment03["expected_tps"].shift(fill_value=1)
 
-df_experiment03 = df_experiment03[(df['cpu'] == 40)] 
+df_experiment03 = df_experiment03[(df['cpu'] == 40)]
+
+df_experiment03['cpu_utilization'] = (df_experiment03['cpu_usage'] / (df_experiment03['cpu'] / 10.0)).clip(upper=1.0)
 
 # drop all columns except replica, cpu_usage and expected_tps
 df_experiment03 = df_experiment03[['replica', 'expected_tps', 'instant_tps', 'cpu_utilization', 'previous_expected_tps', 'response_time']]
 # rename replica to num_containers, cpu_usage to avg_cpu_util and expected_tps to arrival_rate
 df_experiment03 = df_experiment03.rename(columns={'replica':'num_containers',
-                                      'cpu_usage':'avg_cpu_util',
+                                      'cpu_utilization':'avg_cpu_util',
                                       'expected_tps':'arrival_rate',
                                       'previous_expected_tps':'prev_arrival_rate'})
 # Data for Experiment2

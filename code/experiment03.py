@@ -74,7 +74,7 @@ def state_to_reward(state: Dict) -> float:
         perf_reward = 1 - beta * np.exp(state['response_time'] / 4500) # without normalization, this value explodes
 
     cost_reward = 0
-    if state['avg_cpu_util'] < 1.5: # temp threshold values
+    if state['avg_cpu_util'] < 0.8: # temp threshold values
         cost_reward = 1 - np.exp(1 - state['avg_cpu_util'])
 
     return w * perf_reward + (1 - w) * cost_reward
@@ -287,6 +287,7 @@ class RLEnvironment:
         response_time = sample['response_time'].values[0]
         instant_tps = sample['instant_tps'].values[0]
 
+        # state contains an extended amount of information, but few of these features are given to the agent
         state = {}
         state['num_containers'] = self.num_containers
         state['workload_change_rate'] = self.workload[self.workload_indx] / self.workload[self.workload_indx-1]
