@@ -8,10 +8,10 @@ import torch.nn as nn
 import torch.optim as optim
 import pandas as pd
 
-# container sayısı ve arrival_rate'e müdahale ediyoruz, avg_cpu_util'i okuyoruz.
+# container sayısı ve arrival_rate'e müdahale ediyoruz, avg_cpu_usage'ı okuyoruz.
 # State vektöründe sıfırıncı index hangisiydi, besinci index neydi gibi seylerden kaçmak için
 # mumkun mertebe dict kullandım, en son torch'a girerken tensor'a çeviriyorum.
-STATE_KEYS = ['num_containers', 'arrival_rate', 'avg_cpu_util']
+STATE_KEYS = ['num_containers', 'arrival_rate', 'avg_cpu_usage']
 # DQN'in replay memory'si için transition tanımı
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
 # Episode sayisi
@@ -69,9 +69,8 @@ def normalize_state(state: Dict) -> Dict:
 
 
 def state_to_reward(state: Dict) -> float:
-    '''Experiment02 için şimdilik avg_cpu_util'i reward olarak kullanıyoruz. 
-    avg_cpu_util ne kadar yüksekse o kadar iyi olsun isteyelim.'''
-    reward = state['avg_cpu_util']
+    '''avg_cpu_usage ne kadar yüksekse o kadar iyi olsun isteyelim.'''
+    reward = state['avg_cpu_usage']
     return reward
 
 def print_step_info(episode: int, step: int, state: Dict, action: Dict, next_state: Dict, reward: float, loss: float, exploration: bool):
@@ -266,20 +265,20 @@ class RLEnvironment:
 
     def get_rl_states(self) -> Dict:
         '''Guya metrik topluyoruz burada. Şimdilik data içinden random sample alarak üretiyorum.
-        Datadan bakılınca avg_cpu_util ile num_container arasında ters orantı var.
-        Reward da zaten avg_cpu_util. Dolayısı ile agent num_container'ı azaltmaya çalışacak.'''
+        Datadan bakılınca avg_cpu_usage ile num_container arasında ters orantı var.
+        Reward da zaten avg_cpu_usage. Dolayısı ile agent num_container'ı azaltmaya çalışacak.'''
         
         # Data'yi süzdükten sonra random sample aliyoruz. Experiment02 özelinde süzdükten sonra her 
         # zaman veri kalacagini biliyorum o yuzden ek kontrol koymadim.
         filtered_data = self.nsfw_data.query(f'num_containers == {self.num_containers} and arrival_rate == {self.arrival_rate}')
-        avg_cpu_util = filtered_data.sample(1)['avg_cpu_util'].values[0]
+        avg_cpu_usage = filtered_data.sample(1)['avg_cpu_usage'].values[0]
 
         # Butun state bilgilerini içeren bir dict oluşturuyoruz.
         # Torch'a dokunmadıkça state'i hep dictionary ve normalize etmeden tutuyorum.
         state = {k: 0 for k in STATE_KEYS}
         state['num_containers'] = self.num_containers
         state['arrival_rate'] = self.arrival_rate
-        state['avg_cpu_util'] = avg_cpu_util
+        state['avg_cpu_usage'] = avg_cpu_usage
         return state
 
     def reset(self) -> Dict:
@@ -331,13 +330,13 @@ def plot_history(history):
     ax1.set_xlabel('episode')
     ax1.set_ylabel('reward', color=color)
     ax1.plot(episode_rewards, color=color)
-    ax1.plot(smoothed_episode_rewards, '--', color=color)
+    ax1.plot(smoothed_episode_rewards, '-', color='black')
     ax1.tick_params(axis='y', labelcolor=color)
 
     color = 'tab:blue'
     ax2.set_ylabel('loss', color=color)  # we already handled the x-label with ax1
     ax2.plot(episode_losses, color=color)
-    ax2.plot(smoothed_episode_losses, '--', color=color)
+    ax2.plot(smoothed_episode_losses, '-', color='black')
     ax2.tick_params(axis='y', labelcolor=color)
 
     fig.tight_layout()  # otherwise the right y-label is slightly clipped

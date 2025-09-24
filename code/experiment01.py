@@ -7,10 +7,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-# container sayısı ve arrival_rate'e müdahale ediyoruz, avg_cpu_util'i okuyoruz.
+# container sayısı ve arrival_rate'e müdahale ediyoruz, avg_cpu_usage'ı okuyoruz.
 # State vektöründe sıfırıncı index hangisiydi, besinci index neydi gibi seylerden kaçmak için
 # mumkun mertebe dict kullandım, en son torch'a girerken tensor'a çeviriyorum.
-STATE_KEYS = ['num_containers', 'arrival_rate', 'avg_cpu_util']
+STATE_KEYS = ['num_containers', 'arrival_rate', 'avg_cpu_usage']
 # DQN'in replay memory'si için transition tanımı
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
 # Episode sayisi
@@ -68,9 +68,9 @@ def normalize_state(state: Dict) -> Dict:
 
 
 def state_to_reward(state: Dict) -> float:
-    '''dummy testler için şimdilik avg_cpu_util'i reward olarak kullanıyoruz. 
-    avg_cpu_util ne kadar yüksekse o kadar iyi olsun isteyelim.'''
-    reward = state['avg_cpu_util']
+    '''dummy testler için şimdilik avg_cpu_usage'ı reward olarak kullanıyoruz. 
+    avg_cpu_usage ne kadar yüksekse o kadar iyi olsun isteyelim.'''
+    reward = state['avg_cpu_usage']
     return reward
 
 def print_step_info(episode: int, step: int, state: Dict, action: Dict, next_state: Dict, reward: float, loss: float, exploration: bool):
@@ -257,17 +257,17 @@ class RLEnvironment:
 
     def get_rl_states(self) -> Dict:
         '''Guya metrik topluyoruz burada. Şimdilik sentetik olarak üretiyorum.
-        Cok cok basit bir şekilde avg_cpu_util ile num_container arasında doğrusal ilişki kurdum.
-        Reward da zaten avg_cpu_util. Dolayısı ile agent num_container'ı artırmaya çalışacak.'''
+        Cok cok basit bir şekilde avg_cpu_usage ile num_container arasında doğrusal ilişki kurdum.
+        Reward da zaten avg_cpu_usage. Dolayısı ile agent num_container'ı artırmaya çalışacak.'''
         
-        avg_cpu_util = self.num_containers / MAX_NUM_CONTAINERS
+        avg_cpu_usage = self.num_containers / MAX_NUM_CONTAINERS
 
         # Butun state bilgilerini içeren bir dict oluşturuyoruz.
         # Torch'a dokunmadıkça state'i hep dictionary ve normalize etmeden tutuyorum.
         state = {k: 0 for k in STATE_KEYS}
         state['num_containers'] = self.num_containers
         state['arrival_rate'] = self.arrival_rate
-        state['avg_cpu_util'] = avg_cpu_util
+        state['avg_cpu_usage'] = avg_cpu_usage
         return state
 
     def reset(self) -> Dict:

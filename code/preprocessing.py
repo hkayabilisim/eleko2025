@@ -25,9 +25,9 @@ df_experiment02 = df[(df['cpu'] == 40) & (df['expected_tps'] == 2)]
 
 # drop all columns except replica, cpu_usage and expected_tps
 df_experiment02 = df_experiment02[['replica','expected_tps','cpu_usage']]
-# rename replica to num_containers, cpu_usage to avg_cpu_util and expected_tps to arrival_rate
+# rename columns to match AWARE
 df_experiment02 = df_experiment02.rename(columns={'replica':'num_containers',
-                                      'cpu_usage':'avg_cpu_util',
+                                      'cpu_usage':'avg_cpu_usage',
                                       'expected_tps':'arrival_rate'})
 # Data for Experiment2
 df_experiment02.to_csv('../data/nsfw_experiment2.csv',index=False)
