@@ -57,3 +57,24 @@ df_experiment03 = df_experiment03.rename(columns={'replica':'num_containers',
 # Data for Experiment2
 df_experiment03.to_csv('../data/nsfw_experiment3.csv',index=False)
 print('Saved ../data/nsfw_experiment3.csv')
+
+#############################
+# Data prep for Experiment04
+#############################
+print(f'Preparing experiment03 data with varying cpu and varying expected_tps')
+
+df_experiment04 = df.copy()
+df_experiment04["previous_expected_tps"] = df_experiment04["expected_tps"].shift(fill_value=1)
+
+df_experiment04['cpu_utilization'] = (df_experiment04['cpu_usage'] / (df_experiment04['cpu'] / 10.0)).clip(upper=1.0)
+
+# drop all columns except replica, cpu_usage and expected_tps
+df_experiment04 = df_experiment04[['replica', 'cpu', 'expected_tps', 'instant_tps', 'cpu_utilization', 'previous_expected_tps', 'response_time']]
+# rename replica to num_containers, cpu_usage to avg_cpu_util and expected_tps to arrival_rate
+df_experiment04 = df_experiment04.rename(columns={'replica':'num_containers',
+                                      'cpu_utilization':'avg_cpu_util',
+                                      'expected_tps':'arrival_rate',
+                                      'previous_expected_tps':'prev_arrival_rate'})
+# Data for Experiment2
+df_experiment04.to_csv('../data/nsfw_experiment4.csv',index=False)
+print('Saved ../data/nsfw_experiment4.csv')
