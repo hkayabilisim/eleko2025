@@ -2,4 +2,11 @@
 set -ex
 
 # This is the master script for the capsule. When you click "Reproducible Run", the code in this file will execute.
-python -u experiment01.py "$@"
+python -u preprocessing.py "$@"
+
+for exp in 01 02 03 05
+do
+  echo "Running Experiment $exp"
+  python -u experiment${exp}.py "$@"
+done
+

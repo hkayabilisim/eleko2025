@@ -59,6 +59,7 @@ df_experiment03.to_csv('../data/nsfw_experiment3.csv',index=False)
 print('Saved ../data/nsfw_experiment3.csv')
 
 #############################
+
 # Data prep for Experiment04
 #############################
 print(f'Preparing experiment03 data with varying cpu and varying expected_tps')
@@ -78,3 +79,28 @@ df_experiment04 = df_experiment04.rename(columns={'replica':'num_containers',
 # Data for Experiment2
 df_experiment04.to_csv('../data/nsfw_experiment4.csv',index=False)
 print('Saved ../data/nsfw_experiment4.csv')
+
+# Data prep for Experiment05
+#############################
+def prep_experiment5(df):
+    # Copy only index
+    df_exp = pd.DataFrame(index=df.index.copy())
+
+    # Copy/transform attributes
+    df_exp['num_containers']           = df['replica']
+    df_exp['arrival_rate']             = df['expected_tps']
+    df_exp['cpu_shares_per_container'] = df['cpu'] * 100            # milicpu
+    df_exp['avg_cpu_usage']            = df['cpu_usage'] * 1000     # milicpu
+    df_exp['latency']                  = df['response_time'] / 1000 # seconds
+    df_exp['processing_rate']          = df['num_request']
+
+    # New attributes
+    df_exp['previous_arrival_rate']    = df_exp['arrival_rate'].shift(fill_value=1)
+    df_exp['arrival_change_rate']      = df_exp['arrival_rate'] / df_exp['previous_arrival_rate']
+    df_exp['cpu_utilization']          = (df_exp['avg_cpu_usage'] / df_exp['cpu_shares_per_container']).clip(upper=1.0)
+    df_exp['data_processing_rate']     = df_exp['processing_rate'] / df_exp['arrival_rate']
+
+    df_exp.to_csv('../data/nsfw_experiment5.csv',index=False)
+    print('Processing experiment05 and saving into ../data/nsfw_experiment5.csv')
+
+prep_experiment5(df)

@@ -9,37 +9,49 @@ import torch.optim as optim
 import pandas as pd
 import itertools
 from pathlib import Path
-import matplotlib.pyplot as plt
 
-
-# container sayısı ve arrival_rate'e müdahale ediyoruz, avg_cpu_util'i okuyoruz.
 # State vektöründe sıfırıncı index hangisiydi, besinci index neydi gibi seylerden kaçmak için
 # mumkun mertebe dict kullandım, en son torch'a girerken tensor'a çeviriyorum.
-STATE_KEYS = ['num_containers', 'cpu_allocation', 'avg_cpu_util', 'workload_process_rate', 'workload_change_rate']
+STATE_KEYS = ['num_containers',
+              'cpu_shares_per_container',
+              'avg_cpu_usage',
+              'cpu_utilization',
+              'data_processing_rate',
+              'arrival_rate',
+              'previous_arrival_rate',
+              'processing_rate',
+              'arrival_change_rate',
+              'latency']
 # DQN'in replay memory'si için transition tanımı
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
 # Episode sayisi
-NUM_EPISODES = 1000
+NUM_EPISODES = 200
 # Step sayisi
-NUM_STEPS = 16
+NUM_STEPS = 128
 # Tekrarlanabilirlik için random seed
 RANDOM_SEED = 42
 # Container sayisi, min, max, ve initial
 MIN_NUM_CONTAINERS = 1
 MAX_NUM_CONTAINERS = 3
-
-MIN_CPU_ALLOC = 40
-MAX_CPU_ALLOC = 49
-
+# CPU allocation in milicpus (verticala hazırlık)
+MIN_CPU_SHARES_PER_CONTAINER = 4000
+MAX_CPU_SHARES_PER_CONTAINER = 4900
+# 100 milicpuluk bir discretizasyon var
+INCR_CPU_SHARES_PER_CONTAINER = 100
+MIN_CPU_SCALING = 0
+MAX_CPU_SCALING = 9
 MAX_ARRIVAL_RATE = 30
+SLO_LATENCY = 1.5 # seconds
+MAX_LATENCY = 4.5 # seconds
+SLO_CPU_UTILIZATION = 0.8
 # Aksiyon: kaç konteyner varsa o kadar aksiyon var
-NUM_ACTIONS = (MAX_CPU_ALLOC - MIN_CPU_ALLOC + 1) * (MAX_NUM_CONTAINERS - MIN_NUM_CONTAINERS + 1)
+NUM_ACTIONS = (MAX_NUM_CONTAINERS - MIN_NUM_CONTAINERS + 1) * (MAX_CPU_SCALING - MIN_CPU_SCALING + 1)
 # State: STATE_KEYS'teki eleman sayısı kadar. Network'e key sırası ile giriyor.
 NUM_STATES = len(STATE_KEYS)
 # Replay memory'den batch_size kadar random örnek alıp train ediyoruz.
-BATCH_SIZE = 64
+BATCH_SIZE = 128
 # replay memory'nin max büyüklüğü. Yeni bir transition eklenirse en eski siliniyor. (deque ile yapmışlar)
-REPLAY_MEMORY_SIZE = 4000
+REPLAY_MEMORY_SIZE = 1024
 # Bunu cok bilmiyorum, DQN training sırasında kullanılıyor.
 GAMMA = 0.99
 # Epsilon-greedy için başlangıç, bitiş ve decay hızı
@@ -47,16 +59,19 @@ EPS_START = 0.9
 EPS_END = 0.05
 EPS_DECAY = 4000
 # Kaç episode'da bir target network'ü policy network ile aynı yapalım.
-TARGET_UPDATE = 20
+TARGET_UPDATE = 200
 
 def action_tensor_to_dict(action: torch.Tensor) -> Dict:
     '''Network'den tensor olarak çıkan sıfır indeksli aksiyonu dict'e çeviriyoruz.'''
 
     action_index = action.item()
-    # action_index 0 ise MIN_NUM_CONTAINERS konteyner, 1 ise MIN_NUM_CONTAINERS+1 konteyner, ... diye gidiyor.
-    cpu_action = action_index % (MAX_CPU_ALLOC - MIN_CPU_ALLOC + 1)
-    replica_action = action_index // (MAX_CPU_ALLOC - MIN_CPU_ALLOC + 1)
-    action_dict = {'vertical': cpu_action + MIN_CPU_ALLOC, 'scale_to': replica_action + MIN_NUM_CONTAINERS}
+
+    # action_index'ini (horizontal, vertical) tuple'ına çeviriyoruz
+    horizontal = tuple(range(MIN_NUM_CONTAINERS, MAX_NUM_CONTAINERS +1))
+    vertical = tuple(range(MIN_CPU_SHARES_PER_CONTAINER, MAX_CPU_SHARES_PER_CONTAINER + 1, INCR_CPU_SHARES_PER_CONTAINER))
+    action_tuples = list(itertools.product(horizontal, vertical))
+
+    action_dict = {'scale_to': action_tuples[action_index]}
     return action_dict
 
 def state_to_tensor(state: Dict) -> torch.Tensor:
@@ -68,25 +83,27 @@ def state_to_tensor(state: Dict) -> torch.Tensor:
 def normalize_state(state: Dict) -> Dict:
     '''State normalizasyonunu özellikle dict üzerinde yapıyoruz ki sayısal indeksler neydi pesinde kosmayalim'''
 
-    normalized_state = {k:0 for k in STATE_KEYS}
-    normalized_state['num_containers'] = state['num_containers'] / MAX_NUM_CONTAINERS
-    normalized_state['avg_cpu_util'] = state['avg_cpu_util']
-    normalized_state['workload_change_rate'] = state['workload_change_rate']
-    normalized_state['workload_process_rate'] = state['workload_process_rate']
-    normalized_state['cpu_allocation'] = state['cpu_allocation']
+    normalized_state = state.copy()
+    normalized_state['num_containers'] /= MAX_NUM_CONTAINERS
+    normalized_state['cpu_shares_per_container'] /=  MAX_CPU_SHARES_PER_CONTAINER
+    normalized_state['avg_cpu_usage'] /= 1000
+    normalized_state['arrival_rate'] /= MAX_ARRIVAL_RATE
+    normalized_state['previous_arrival_rate'] /= MAX_ARRIVAL_RATE
+    normalized_state['processing_rate'] /= MAX_ARRIVAL_RATE
+    
     return normalized_state
 
 
 def state_to_reward(state: Dict) -> float:
-    beta = 1.2
+    beta = 1.0 / MAX_LATENCY
     w = 0.8
     perf_reward = 0
-    if state['response_time'] > 1500.0: # temp threshold values
-        perf_reward = 1 - beta * np.exp(state['response_time'] / 4500) # without normalization, this value explodes
+    if state['latency'] > SLO_LATENCY:
+        perf_reward = 1 - np.exp(beta * state['latency'])
 
     cost_reward = 0
-    if state['avg_cpu_util'] < 0.8: # temp threshold values
-        cost_reward = 1 - np.exp(1 - state['avg_cpu_util'])
+    if state['cpu_utilization'] < SLO_CPU_UTILIZATION:
+        cost_reward = 1 - np.exp(1 - state['cpu_utilization'])
 
     return w * perf_reward + (1 - w) * cost_reward
 
@@ -97,21 +114,21 @@ def print_step_info(episode: int, step: int, state: Dict, action: Dict, next_sta
         print_step_info.count = 0
 
     def p_keys(d: Dict) -> str:
-        print('\t'.join([f'{k:>{len(k)}}' for k, v in d.items()]))
-        print('\t'.join(['-'*len(k) for k, v in d.items()]))
+        print(' '.join([f'{k:>{len(k)}}' for k, v in d.items()]))
+        print(' '.join(['-'*len(k) for k, v in d.items()]))
 
 
     def p_values(d: Dict) -> str:
-        print('\t'.join([f'{v:{len(k)}.3f}' if isinstance(v, float) else f'{v:{len(k)}d}' for k, v in d.items()]))
+        print(' '.join([f'{v:{len(k)}.3f}' if isinstance(v, float) else f'{v:{len(k)}d}' for k, v in d.items()]))
 
 
     all_dicts = {'episode': episode, 'step': step}
     for k, v in state.items():
         all_dicts[k] = v
-    all_dicts['horizontal_action'] = action['scale_to']
-    all_dicts['vertical_action'] = action['vertical']
-    for k, v in next_state.items():
-        all_dicts[f'next_{k}'] = v
+    all_dicts['hor_action'] = action['scale_to'][0]
+    all_dicts['ver_action'] = action['scale_to'][1]
+    #for k, v in next_state.items():
+    #    all_dicts[f'next_{k}'] = v
     all_dicts['reward'] = reward
     all_dicts['policy_net_loss'] = loss
     all_dicts['exploration'] = exploration
@@ -145,9 +162,9 @@ class DQNNetwork(nn.Module):
         B x num_states -> B x num_actions şeklinde.'''
         super(DQNNetwork, self).__init__()
 
-        self.fc1 = nn.Linear(num_states, 8)
-        self.fc2 = nn.Linear(8, 8)
-        self.fc3 = nn.Linear(8, num_actions)
+        self.fc1 = nn.Linear(num_states, 16)
+        self.fc2 = nn.Linear(16, 16)
+        self.fc3 = nn.Linear(16, num_actions)
         self.relu = nn.ReLU()
 
     def forward(self, x):
@@ -227,7 +244,7 @@ class DQN:
 
         return loss.item()
 
-    def train(self, num_episodes, num_steps):
+    def train(self, num_episodes, num_steps, verbose = False):
         rewards = np.zeros((num_episodes, num_steps))
         losses = np.zeros((num_episodes, num_steps))
 
@@ -256,7 +273,8 @@ class DQN:
                     loss = math.nan
 
                 # Diagnostic amaçlı çeşitli bilgileri yazdırıyoruz.
-                print_step_info(episode, step, state, action_to_execute, next_state, reward, loss, exploration)
+                if verbose:
+                    print_step_info(episode, step, state, action_to_execute, next_state, reward, loss, exploration)
                 rewards[episode, step] = reward
                 losses[episode, step] = loss
 
@@ -274,10 +292,10 @@ class RLEnvironment:
     def __init__(self):
         '''Bağımsız değişkenlerimiz bunlar.'''
         self.num_containers = None
-        self.cpu_allocation = None
+        self.cpu_shares_per_container = None
         self.workload_indx = None
 
-        self.nsfw_data = pd.read_csv('../data/nsfw_experiment4.csv')
+        self.nsfw_data = pd.read_csv('../data/nsfw_experiment5.csv')
 
         self.workload = [
             14, 7, 5, 4, 3, 4, 3, 3, 2, 2, 3, 4, 6, 10, 14, 18, 21, 22, 24, 25,
@@ -287,37 +305,24 @@ class RLEnvironment:
 
 
     def get_rl_states(self) -> Dict:
-        filtered_data = self.nsfw_data.query(f'num_containers == {self.num_containers} and cpu == {self.cpu_allocation} and arrival_rate == {self.workload[self.workload_indx]} and prev_arrival_rate == {self.workload[self.workload_indx-1]}')
+        filtered_data = self.nsfw_data.query(f'num_containers == {self.num_containers} and arrival_rate == {self.workload[self.workload_indx]} and cpu_shares_per_container == {self.cpu_shares_per_container}')
 
         assert not filtered_data.empty, (
             f"No data found for num_containers={self.num_containers}, "
-            f"cpu={self.cpu_allocation}, "
             f"arrival_rate={self.workload[self.workload_indx]}, "
-            f"prev_arrival_rate={self.workload[self.workload_indx]-1}"
+            f"cpu_shares_per_container={self.cpu_shares_per_container}"
         )
 
         sample = filtered_data.sample(1)
-        avg_cpu_util = sample['avg_cpu_util'].values[0]
-        response_time = sample['response_time'].values[0]
-        instant_tps = sample['instant_tps'].values[0]
-
-        # state contains an extended amount of information, but few of these features are given to the agent
-        state = {}
-        state['num_containers'] = self.num_containers
-        state['workload_change_rate'] = self.workload[self.workload_indx] / self.workload[self.workload_indx-1]
-        state['cpu_allocation'] = self.cpu_allocation
-        state['avg_cpu_util'] = avg_cpu_util
-        state['response_time'] = response_time
-        state['workload_process_rate'] = instant_tps / self.workload[self.workload_indx]
-        state['arrival_rate'] = self.workload[self.workload_indx]
-        state['prev_arrival_rate'] = self.workload[self.workload_indx-1]
+        state = {k: sample[k].values[0] for k in STATE_KEYS}
+        
         return state
 
     def reset(self) -> Dict:
         '''Her episode başında environment'ı resetliyoruz.'''
         self.num_containers = random.choice(range(MIN_NUM_CONTAINERS, MAX_NUM_CONTAINERS+1))
-        self.cpu_allocation = random.choice(range(MIN_CPU_ALLOC, MAX_CPU_ALLOC+1))
-        self.workload_indx = random.randint(1, len(self.workload) - NUM_STEPS - 1)
+        self.cpu_shares_per_container = random.choice(range(MIN_CPU_SHARES_PER_CONTAINER, MAX_CPU_SHARES_PER_CONTAINER + 1, INCR_CPU_SHARES_PER_CONTAINER))
+        self.workload_indx = random.randint(0, len(self.workload) - 1)
 
         state= self.get_rl_states()
 
@@ -325,10 +330,8 @@ class RLEnvironment:
 
     def step(self, action: Dict) -> Tuple[Dict, float, bool]:
         # Execute the action
-        self.num_containers = action['scale_to']
-        self.cpu_allocation = action['vertical']
+        self.num_containers, self.cpu_shares_per_container = action['scale_to']
 
-        self.workload_indx += 1
 
         # Observe the next state
         state = self.get_rl_states()
@@ -339,9 +342,16 @@ class RLEnvironment:
         # check if done
         done = False
 
+        self.workload_indx += 1
+
+        # rewind to first workload
+        if self.workload_indx >= len(self.workload):
+            self.workload_indx = 0
+
         return state, reward, done
 
 def plot_history(history, save_path = None):
+    import matplotlib.pyplot as plt
     num_episodes = history['rewards'].shape[0]
 
     episode_rewards =np.mean(history['rewards'], axis=1)
@@ -374,7 +384,7 @@ def plot_history(history, save_path = None):
     ax2.tick_params(axis='y', labelcolor=color)
 
     fig.tight_layout()  # otherwise the right y-label is slightly clipped
-
+        
     if save_path:
         file_path = Path(save_path)
         file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -392,6 +402,6 @@ if __name__ == "__main__":
 
     agent = DQN(env, NUM_STATES, NUM_ACTIONS)
 
-    history = agent.train(NUM_EPISODES, NUM_STEPS)
+    history = agent.train(NUM_EPISODES, NUM_STEPS, verbose = True)
 
-    plot_history(history, save_path='../results/experiment04.pdf')
+    plot_history(history, save_path='../results/experiment05.pdf')
