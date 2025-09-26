@@ -7,11 +7,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import pandas as pd
-import itertools
+import matplotlib.pyplot as plt
 from pathlib import Path
 
-# State vektöründe sıfırıncı index hangisiydi, besinci index neydi gibi seylerden kaçmak için
-# mumkun mertebe dict kullandım, en son torch'a girerken tensor'a çeviriyorum.
+# State is stored in dictionary with the following attributes
 STATE_KEYS = ['num_containers',
               'cpu_shares_per_container',
               'avg_cpu_usage',
@@ -22,80 +21,101 @@ STATE_KEYS = ['num_containers',
               'processing_rate',
               'arrival_change_rate',
               'latency']
-# DQN'in replay memory'si için transition tanımı
+# These keys of the state are used in the policy
+STATE_KEYS_IN_POLICY = ['num_containers',
+                          'cpu_shares_per_container',
+                          'cpu_utilization',
+                          'data_processing_rate',
+                          'arrival_change_rate'
+                          ]
+# Replay memory of DQN uses transitions
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
-# Episode sayisi
-NUM_EPISODES = 200
-# Step sayisi
-NUM_STEPS = 128
-# Tekrarlanabilirlik için random seed
+# Number of experiments
+NUM_EXPERIMENTS = 10
+# Number of episodes
+NUM_EPISODES = 1000
+# Number of steps in each episode
+NUM_STEPS = 16
+# Random seed for reproducibility
 RANDOM_SEED = 42
-# Container sayisi, min, max, ve initial
+# Minimum and maximum number of containers
 MIN_NUM_CONTAINERS = 1
 MAX_NUM_CONTAINERS = 3
-# CPU allocation in milicpus (verticala hazırlık)
+# CPU allocation in milicpus
 MIN_CPU_SHARES_PER_CONTAINER = 4000
 MAX_CPU_SHARES_PER_CONTAINER = 4900
-# 100 milicpuluk bir discretizasyon var
 INCR_CPU_SHARES_PER_CONTAINER = 100
-MIN_CPU_SCALING = 0
-MAX_CPU_SCALING = 9
+# Maximum arrival rate (unit is number of requests per second)
 MAX_ARRIVAL_RATE = 30
-SLO_LATENCY = 1.5 # seconds
-MAX_LATENCY = 4.5 # seconds
+# Latency objective in seconds
+SLO_LATENCY = 1.5
+# Maximum latency observed in the data in seconds
+MAX_LATENCY = 4.5
+# Service Level Objective in CPU utilization
 SLO_CPU_UTILIZATION = 0.8
-# Aksiyon: kaç konteyner varsa o kadar aksiyon var
-NUM_ACTIONS = (MAX_NUM_CONTAINERS - MIN_NUM_CONTAINERS + 1) * (MAX_CPU_SCALING - MIN_CPU_SCALING + 1)
-# State: STATE_KEYS'teki eleman sayısı kadar. Network'e key sırası ile giriyor.
-NUM_STATES = len(STATE_KEYS)
-# Replay memory'den batch_size kadar random örnek alıp train ediyoruz.
-BATCH_SIZE = 128
-# replay memory'nin max büyüklüğü. Yeni bir transition eklenirse en eski siliniyor. (deque ile yapmışlar)
-REPLAY_MEMORY_SIZE = 1024
-# Bunu cok bilmiyorum, DQN training sırasında kullanılıyor.
+# Horizontal/vertical actions
+VERTICAL_ACTIONS = list(range(MIN_CPU_SHARES_PER_CONTAINER, MAX_CPU_SHARES_PER_CONTAINER + INCR_CPU_SHARES_PER_CONTAINER, INCR_CPU_SHARES_PER_CONTAINER))
+HORIZONTAL_ACTIONS = list(range(MIN_NUM_CONTAINERS, MAX_NUM_CONTAINERS + 1))
+# Number of actions
+NUM_ACTIONS_HORIZONTAL = len(HORIZONTAL_ACTIONS)
+NUM_ACTIONS_VERTICAL = len(VERTICAL_ACTIONS)
+NUM_ACTIONS = NUM_ACTIONS_HORIZONTAL * NUM_ACTIONS_VERTICAL
+# Number of states in the policy networks
+NUM_STATES = len(STATE_KEYS_IN_POLICY)
+# Batch size for neural network training. These are sampled from replay memory.
+BATCH_SIZE = 64
+# Replay memory size. Memory is implemented as a deque.
+REPLAY_MEMORY_SIZE = 4000
+# A hyperparameter in DQN training
 GAMMA = 0.99
-# Epsilon-greedy için başlangıç, bitiş ve decay hızı
+# Epsilon-greedy parameters
 EPS_START = 0.9
 EPS_END = 0.05
 EPS_DECAY = 4000
-# Kaç episode'da bir target network'ü policy network ile aynı yapalım.
-TARGET_UPDATE = 200
+# Target network is updated every <TARGET_UPDATE> episodes.
+TARGET_UPDATE = 20
 
 def action_tensor_to_dict(action: torch.Tensor) -> Dict:
-    '''Network'den tensor olarak çıkan sıfır indeksli aksiyonu dict'e çeviriyoruz.'''
+    '''Converts the output of the DQN network to action dict.'''
 
     action_index = action.item()
-
-    # action_index'ini (horizontal, vertical) tuple'ına çeviriyoruz
-    horizontal = tuple(range(MIN_NUM_CONTAINERS, MAX_NUM_CONTAINERS +1))
-    vertical = tuple(range(MIN_CPU_SHARES_PER_CONTAINER, MAX_CPU_SHARES_PER_CONTAINER + 1, INCR_CPU_SHARES_PER_CONTAINER))
-    action_tuples = list(itertools.product(horizontal, vertical))
-
-    action_dict = {'scale_to': action_tuples[action_index]}
+    vertical_action = action_index % NUM_ACTIONS_VERTICAL
+    horizontal_action = action_index // NUM_ACTIONS_VERTICAL
+    action_dict = {'vertical': VERTICAL_ACTIONS[vertical_action],
+                   'horizontal': HORIZONTAL_ACTIONS[horizontal_action]}
     return action_dict
 
 def state_to_tensor(state: Dict) -> torch.Tensor:
-    '''State dict'ini torch tensor'a çeviriyoruz. Burada listeyi ekstra bir [] içine koyuyoruz ki
-    birden fazla state'i birleştirince batch dimension'i oluşsun.'''
+    '''State dict is converted to torch tensor. We use extra [] around the state
+    so that when accumulated a batch dimension is produced.'''
 
     return torch.FloatTensor([list(state.values())])
 
+def state_subset(state: Dict) -> Dict:
+    '''Take the subset of the state that goes to neural networks.'''
+
+    return {k: state[k] for k in STATE_KEYS_IN_POLICY}
+
 def normalize_state(state: Dict) -> Dict:
-    '''State normalizasyonunu özellikle dict üzerinde yapıyoruz ki sayısal indeksler neydi pesinde kosmayalim'''
+    '''State normalization is handled via dictionary keys 
+    so that we don't need a separate bookkeeping for indexes.
+    This function is only used right before feeding
+    the state to the neural network.'''
 
     normalized_state = state.copy()
     normalized_state['num_containers'] /= MAX_NUM_CONTAINERS
     normalized_state['cpu_shares_per_container'] /=  MAX_CPU_SHARES_PER_CONTAINER
-    normalized_state['avg_cpu_usage'] /= 1000
+    normalized_state['avg_cpu_usage'] /= MAX_CPU_SHARES_PER_CONTAINER
     normalized_state['arrival_rate'] /= MAX_ARRIVAL_RATE
     normalized_state['previous_arrival_rate'] /= MAX_ARRIVAL_RATE
     normalized_state['processing_rate'] /= MAX_ARRIVAL_RATE
-    
+
     return normalized_state
 
 
 def state_to_reward(state: Dict) -> float:
-    beta = 1.0 / MAX_LATENCY
+    '''Calculate reward based on state. Note that input state is non-normalized'''
+    beta = 1.0 / state['latency']
     w = 0.8
     perf_reward = 0
     if state['latency'] > SLO_LATENCY:
@@ -108,29 +128,29 @@ def state_to_reward(state: Dict) -> float:
     return w * perf_reward + (1 - w) * cost_reward
 
 def print_step_info(episode: int, step: int, state: Dict, action: Dict, next_state: Dict, reward: float, loss: float, exploration: bool):
-    '''Diagnostik amaçlı çeşitli bilgileri yazdırıyoruz.'''
+    '''Printing diagnostics.'''
 
     if not hasattr(print_step_info, 'count'):
         print_step_info.count = 0
 
     def p_keys(d: Dict) -> str:
+        '''Printing the keys of a dictionary.'''
         print(' '.join([f'{k:>{len(k)}}' for k, v in d.items()]))
         print(' '.join(['-'*len(k) for k, v in d.items()]))
 
-
     def p_values(d: Dict) -> str:
+        '''Printing the values of a dictionary. Key widths are used.'''
         print(' '.join([f'{v:{len(k)}.3f}' if isinstance(v, float) else f'{v:{len(k)}d}' for k, v in d.items()]))
-
 
     all_dicts = {'episode': episode, 'step': step}
     for k, v in state.items():
         all_dicts[k] = v
-    all_dicts['hor_action'] = action['scale_to'][0]
-    all_dicts['ver_action'] = action['scale_to'][1]
+    all_dicts['horizontal_action'] = action['horizontal']
+    all_dicts['vertical_action'] = action['vertical']
     #for k, v in next_state.items():
     #    all_dicts[f'next_{k}'] = v
     all_dicts['reward'] = reward
-    all_dicts['policy_net_loss'] = loss
+    all_dicts['loss'] = loss
     all_dicts['exploration'] = exploration
 
     if print_step_info.count % NUM_STEPS == 0:
@@ -141,8 +161,7 @@ def print_step_info(episode: int, step: int, state: Dict, action: Dict, next_sta
 
 
 class ReplayMemory(object):
-    '''deque ile süper basit bir replay memory implementasyonu
-    yapmışlar çok beğendim.'''
+    '''A replay memory implementation with deque'''
 
     def __init__(self, capacity):
         self.memory = deque([], maxlen=capacity)
@@ -158,13 +177,13 @@ class ReplayMemory(object):
 
 class DQNNetwork(nn.Module):
     def __init__(self, num_states, num_actions):
-        '''Normalize edilmiş state batch vektörünü alıyor. Aksiyon skorlarını döndürüyor.
-        B x num_states -> B x num_actions şeklinde.'''
+        '''Takes normalized batch matrix and returns the action scores:
+        B x num_states -> B x num_actions where B is batch size.'''
         super(DQNNetwork, self).__init__()
 
-        self.fc1 = nn.Linear(num_states, 16)
-        self.fc2 = nn.Linear(16, 16)
-        self.fc3 = nn.Linear(16, num_actions)
+        self.fc1 = nn.Linear(num_states, 8)
+        self.fc2 = nn.Linear(8, 8)
+        self.fc3 = nn.Linear(8, num_actions)
         self.relu = nn.ReLU()
 
     def forward(self, x):
@@ -176,8 +195,7 @@ class DQNNetwork(nn.Module):
 
 class DQN:
     def __init__(self, env, num_states, num_actions):
-        '''DQN implementasyonu, çok bilmiyorum ama birbirinin aynısı
-        iki network kullanması enteresan. Bir bakarsınız hocam.'''
+        '''DQN implementation.'''
         self.env = env
 
         self.num_states = num_states
@@ -187,7 +205,7 @@ class DQN:
         self.target_net = DQNNetwork(num_states, num_actions)
 
         self.target_net.load_state_dict(self.policy_net.state_dict())
-        # Target net'te hiçbir zaman train yapmyacağız.
+        # Target net is never trained.
         self.target_net.eval()
 
         self.optimizer = optim.RMSprop(self.policy_net.parameters())
@@ -196,25 +214,30 @@ class DQN:
         self.steps_completed = 0
 
     def select_action(self, state: Dict) -> Tuple[torch.Tensor, bool]:
-        '''Explore-exploit için epsilon-greedy stratejisi kullanıyoruz.'''
+        '''We use epsilon-greedy strategy for explore-exploit.'''
         sample = random.random()
         eps_threshold = EPS_END + (EPS_START - EPS_END) * math.exp(-1. * self.steps_completed / EPS_DECAY)
         self.steps_completed += 1
         if sample > eps_threshold:
-            with torch.no_grad():
-                # state dictionary'sini son anda normalize edip tensor'a çeviriyoruz.
-                state_tensor = state_to_tensor(normalize_state(state))
-                action = self.policy_net(state_tensor).argmax().view(1, 1)
-                exploration = False
+            action, exploration = self.select_greedy_action(state)
         else:
             action = torch.tensor([[random.randrange(self.num_actions)]], dtype=torch.long)
             exploration = True
 
-        # donen action sıfır indeksli.
+        # zero-index action is returned.
+        return action, exploration
+
+    def select_greedy_action(self, state: Dict) -> Tuple[torch.Tensor, bool]:
+        with torch.no_grad():
+            # state -> normalize -> take subset -> convert to tensor
+            state_tensor = state_to_tensor(state_subset(normalize_state(state)))
+            action = self.policy_net(state_tensor).argmax().view(1, 1)
+            exploration = False
+
         return action, exploration
 
     def optimize_model(self):
-        '''Bu kisma çok hakim değilim, siz bir goz atarsanız sevinirim.'''
+        '''Optimization of the policy network.'''
 
         transitions = self.memory.sample(BATCH_SIZE)
         batch = Transition(*zip(*transitions))
@@ -255,48 +278,49 @@ class DQN:
                 action, exploration = self.select_action(state)
                 action_to_execute = action_tensor_to_dict(action)
 
-                # Episode'u yarıda bırakma durumu yok, o yuzden done burada bosta
+                # Episode is never broken so 'done' is redundant here
                 next_state, reward, done = self.env.step(action_to_execute)
 
-                # Eğitimde kullanmak için verileri replay memory'e ekliyoruz.
-                self.memory.push(state_to_tensor(normalize_state(state)),
+                # We push state->action->next-state->reward transition to replay memory
+                self.memory.push(state_to_tensor(state_subset(normalize_state(state))),
                                  action,
-                                 state_to_tensor(normalize_state(next_state)),
+                                 state_to_tensor(state_subset(normalize_state(next_state))),
                                  torch.tensor([reward]))
 
-                # BATCH_SIZE kadar dolmayanan kadar eğitim yapamıyoruz.
-                # Sonrasında her step'de optimize çalışacak. Elde edilen loss'u
-                # kaydediyorum.
+                # optimize if only the replay memory has enough data
                 if len(self.memory) >= BATCH_SIZE:
                     loss = self.optimize_model()
                 else:
                     loss = math.nan
 
-                # Diagnostic amaçlı çeşitli bilgileri yazdırıyoruz.
                 if verbose:
                     print_step_info(episode, step, state, action_to_execute, next_state, reward, loss, exploration)
+
+                # We store rewards and losses for episode,step pairs.
                 rewards[episode, step] = reward
                 losses[episode, step] = loss
 
-                # next_state bir sonraki adımın state'i olacak. O anlamda state'e aslında action
-                # almadan önceki state diyebiliriz.
+                # next_state will be current state in the next iteration.
                 state = next_state
 
-            # Target network'ü policy network ile aynı yapıyoruz.
+            # Update target network periodically
             if episode % TARGET_UPDATE == 0:
                 self.target_net.load_state_dict(self.policy_net.state_dict())
         return {'rewards': rewards, 'losses': losses}
 
 class RLEnvironment:
 
-    def __init__(self):
-        '''Bağımsız değişkenlerimiz bunlar.'''
+    def __init__(self, data_path=None):
+        '''These variables are used to sample states from the offline data'''
         self.num_containers = None
         self.cpu_shares_per_container = None
+        self.arrival_rate = None
+        self.previous_arrival_rate = None
         self.workload_indx = None
 
-        self.nsfw_data = pd.read_csv('../data/nsfw_experiment5.csv')
+        self.nsfw_data = pd.read_csv(data_path)
 
+        # arrival_rate values
         self.workload = [
             14, 7, 5, 4, 3, 4, 3, 3, 2, 2, 3, 4, 6, 10, 14, 18, 21, 22, 24, 25,
             27, 27, 27, 26, 27, 27, 27, 26, 25, 24, 25, 24, 23, 22, 22, 22,
@@ -305,33 +329,57 @@ class RLEnvironment:
 
 
     def get_rl_states(self) -> Dict:
-        filtered_data = self.nsfw_data.query(f'num_containers == {self.num_containers} and arrival_rate == {self.workload[self.workload_indx]} and cpu_shares_per_container == {self.cpu_shares_per_container}')
+        '''Sampling from the offline data matching the four attributes'''
+
+        filtered_data = self.nsfw_data.query(f'num_containers == {self.num_containers} and '+
+                                             f'arrival_rate == {self.arrival_rate} and '+
+                                             f'previous_arrival_rate == {self.previous_arrival_rate} and '+
+                                             f'cpu_shares_per_container == {self.cpu_shares_per_container}')
 
         assert not filtered_data.empty, (
             f"No data found for num_containers={self.num_containers}, "
-            f"arrival_rate={self.workload[self.workload_indx]}, "
-            f"cpu_shares_per_container={self.cpu_shares_per_container}"
+            f"cpu_shares_per_container={self.cpu_shares_per_container}, "
+            f"arrival_rate={self.arrival_rate}, "
+            f"previous_arrival_rate={self.previous_arrival_rate}"
         )
 
         sample = filtered_data.sample(1)
+        # From the offline data, we only take the state attributes
         state = {k: sample[k].values[0] for k in STATE_KEYS}
-        
+
         return state
 
-    def reset(self) -> Dict:
-        '''Her episode başında environment'ı resetliyoruz.'''
-        self.num_containers = random.choice(range(MIN_NUM_CONTAINERS, MAX_NUM_CONTAINERS+1))
-        self.cpu_shares_per_container = random.choice(range(MIN_CPU_SHARES_PER_CONTAINER, MAX_CPU_SHARES_PER_CONTAINER + 1, INCR_CPU_SHARES_PER_CONTAINER))
-        self.workload_indx = random.randint(0, len(self.workload) - 1)
+    def reset_to(self, num_containers: int, cpu_shares_per_container: int, workload_indx: int) -> Dict:
+        '''Reset to specific state.'''
+        self.num_containers = num_containers
+        self.cpu_shares_per_container = cpu_shares_per_container
+        self.workload_indx = workload_indx
+
+        self.arrival_rate = self.workload[self.workload_indx]
+        self.previous_arrival_rate = self.workload[(self.workload_indx - 1) % len(self.workload)]
 
         state= self.get_rl_states()
 
         return state
 
+    def reset(self) -> Dict:
+        '''Reset to random state.'''
+
+        num_containers = random.choice(HORIZONTAL_ACTIONS)
+        cpu_shares_per_container = random.choice(VERTICAL_ACTIONS)
+        workload_indx = random.randint(0, len(self.workload) - 1)
+
+        return self.reset_to(num_containers, cpu_shares_per_container, workload_indx)
+
     def step(self, action: Dict) -> Tuple[Dict, float, bool]:
         # Execute the action
-        self.num_containers, self.cpu_shares_per_container = action['scale_to']
+        self.num_containers = action['horizontal']
+        self.cpu_shares_per_container = action['vertical']
 
+        self.workload_indx += 1
+        # prev/arrival_rate is taken from workload trace
+        self.arrival_rate = self.workload[self.workload_indx % len(self.workload)]
+        self.previous_arrival_rate = self.workload[(self.workload_indx - 1) % len(self.workload)]
 
         # Observe the next state
         state = self.get_rl_states()
@@ -342,54 +390,137 @@ class RLEnvironment:
         # check if done
         done = False
 
-        self.workload_indx += 1
-
-        # rewind to first workload
-        if self.workload_indx >= len(self.workload):
-            self.workload_indx = 0
-
         return state, reward, done
 
-def plot_history(history, save_path = None):
-    import matplotlib.pyplot as plt
-    num_episodes = history['rewards'].shape[0]
 
-    episode_rewards =np.mean(history['rewards'], axis=1)
-    smoothed_episode_rewards = np.zeros_like(episode_rewards)
-    for i in range(num_episodes):
-        start_idx = max(0, i - 10)
-        smoothed_episode_rewards[i] = np.nanmean(episode_rewards[start_idx:i+1])
+def plot_multi_history(histories, save_path=None):
+    """
+    Plot average rewards and losses across multiple experiments with std shading.
 
-    episode_losses = np.mean(history['losses'], axis=1)
-    smoothed_episode_losses = np.zeros_like(episode_losses)
-    for i in range(num_episodes):
-        start_idx = max(0, i - 10)
-        smoothed_episode_losses[i] = np.mean(episode_losses[start_idx:i+1])
+    Args:
+        histories (list): list of dicts with keys {'rewards', 'losses'}.
+                          Each 'rewards' and 'losses' is shaped (num_episodes, num_steps).
+        save_path (str): optional path to save the figure.
+    """
+    # Collect episode totals
+    all_rewards, all_losses = [], []
 
-    fig, axes = plt.subplots(nrows=2, ncols=1, sharex=True)
+    for h in histories:
+        rewards = np.sum(h['rewards'], axis=1)  # total reward per episode
+        losses = np.mean(h['losses'], axis=1)  # avg loss per episode
+        all_rewards.append(rewards)
+        all_losses.append(losses)
 
+    all_rewards = np.stack(all_rewards)  # (num_experiments, num_episodes)
+    all_losses = np.stack(all_losses)
+
+    num_experiments, num_episodes = all_rewards.shape
+
+    # Mean and std across experiments
+    mean_rewards = np.mean(all_rewards, axis=0)
+    std_rewards = np.std(all_rewards, axis=0)
+
+    mean_losses = np.mean(all_losses, axis=0)
+    std_losses = np.std(all_losses, axis=0)
+
+    # Plot
+    fig, axes = plt.subplots(nrows=2, ncols=1, sharex=True, figsize=(8, 6))
     ax1, ax2 = axes.flatten()
 
-    color = 'tab:red'
-    ax1.set_xlabel('episode')
-    ax1.set_ylabel('reward', color=color)
-    ax1.plot(episode_rewards, color=color)
-    ax1.plot(smoothed_episode_rewards, '--', color=color)
-    ax1.tick_params(axis='y', labelcolor=color)
+    # Rewards
+    ax1.set_title("Training Results Across Experiments")
+    ax1.set_ylabel("Reward")
+    ax1.plot(mean_rewards, color="tab:red", label="Mean Reward")
+    ax1.fill_between(range(num_episodes),
+                     mean_rewards - std_rewards,
+                     mean_rewards + std_rewards,
+                     color="tab:red", alpha=0.2, label="±1 std")
+    ax1.legend()
 
-    color = 'tab:blue'
-    ax2.set_ylabel('loss', color=color)  # we already handled the x-label with ax1
-    ax2.plot(episode_losses, color=color)
-    ax2.plot(smoothed_episode_losses, '--', color=color)
-    ax2.tick_params(axis='y', labelcolor=color)
+    # Losses
+    ax2.set_xlabel("Episode")
+    ax2.set_ylabel("Loss")
+    ax2.plot(mean_losses, color="tab:blue", label="Mean Loss")
+    ax2.fill_between(range(num_episodes),
+                     mean_losses - std_losses,
+                     mean_losses + std_losses,
+                     color="tab:blue", alpha=0.2, label="±1 std")
+    ax2.legend()
 
-    fig.tight_layout()  # otherwise the right y-label is slightly clipped
-        
+    fig.tight_layout()
+
     if save_path:
         file_path = Path(save_path)
         file_path.parent.mkdir(parents=True, exist_ok=True)
-        print(f'Saved reward/loss plot {save_path}')
+        print(f"Saved reward/loss plot {save_path}")
         plt.savefig(save_path)
+
+
+def test_policy(policy, env, n_episodes=20, prefix='experiment', metrics_to_track=["num_containers", "cpu_shares_per_container", "cpu_utilization", "arrival_rate", "latency"]):
+    print("Testing the policy...")
+    episode_rewards = []
+    episode_metrics = []  # e.g., cpu_usage, response_time, etc.
+
+    for ep in range(n_episodes):
+        state = env.reset_to(num_containers=2, cpu_shares_per_container=4200, workload_indx=0)
+        rewards = []
+        metrics = []
+
+        metrics.append({m: state[m] for m in metrics_to_track})
+
+        for step in range(len(env.workload) * 3):
+            action, _ = policy.select_greedy_action(state)
+            action_to_execute = action_tensor_to_dict(action)
+            next_state, reward, done = env.step(action_to_execute)
+
+            # store metrics
+            rewards.append(reward)
+            metrics.append({m: next_state[m] for m in metrics_to_track})
+
+            state = next_state
+            if done:
+                break
+
+        episode_rewards.append(rewards)
+        episode_metrics.append(metrics)
+
+    # Convert to numpy for easier math
+    rewards_array = np.array([np.array(r) for r in episode_rewards])  # shape (episodes, steps)
+    mean_rewards = rewards_array.mean(axis=0)
+    std_rewards = rewards_array.std(axis=0)
+
+    timesteps = np.arange(rewards_array.shape[1])
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(timesteps, mean_rewards, label="Mean Reward")
+    plt.fill_between(timesteps,
+                     mean_rewards - std_rewards,
+                     mean_rewards + std_rewards,
+                     alpha=0.2, label="±1 std")
+    plt.xlabel("Timestep")
+    plt.ylabel("Reward")
+    plt.legend()
+    plt.savefig(f'../results/{prefix}_testing_reward_exp{NUM_EXPERIMENTS}_eps{NUM_EPISODES}.pdf')
+    plt.close()   # close figure to avoid overlap when looping
+
+    # Extract cpu_usage from metrics
+    for metric_name in metrics_to_track:
+        value_array = np.array([[m[metric_name] for m in ep] for ep in episode_metrics])
+        mean = value_array.mean(axis=0)
+        std = value_array.std(axis=0)
+
+        timesteps = np.arange(value_array.shape[1])
+
+        plt.figure(figsize=(8, 5))
+        plt.plot(timesteps, mean, label="App2Scale Agent")
+        plt.fill_between(timesteps, mean - std, mean + std, alpha=0.2)
+        plt.xlabel("Timestep")
+        plt.ylabel(metric_name)
+        plt.legend()
+        plt.savefig(f'../results/{prefix}_testing_{metric_name}_exp{NUM_EXPERIMENTS}_eps{NUM_EPISODES}.pdf')
+        plt.close()   # close figure to avoid overlap when looping
+
+
 
 if __name__ == "__main__":
     '''Ana programımız budur.'''
@@ -398,10 +529,16 @@ if __name__ == "__main__":
     np.random.seed(RANDOM_SEED)
     torch.manual_seed(RANDOM_SEED)
 
-    env = RLEnvironment()
+    episode_histories = []
+    for exp in range(NUM_EXPERIMENTS):
+        env = RLEnvironment(data_path='../data/nsfw_experiment5.csv')
 
-    agent = DQN(env, NUM_STATES, NUM_ACTIONS)
+        policy = DQN(env, NUM_STATES, NUM_ACTIONS)
 
-    history = agent.train(NUM_EPISODES, NUM_STEPS, verbose = True)
+        episode_history = policy.train(NUM_EPISODES, NUM_STEPS, verbose=True)
+        episode_histories.append(episode_history)
 
-    plot_history(history, save_path='../results/experiment05.pdf')
+        if exp == 0:
+            test_policy(policy, env, prefix='experiment05')
+
+    plot_multi_history(episode_histories, save_path=f'../results/experiment05_exp{NUM_EXPERIMENTS}_eps{NUM_EPISODES}.pdf')
