@@ -7,9 +7,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import pandas as pd
-import itertools
-from pathlib import Path
 import matplotlib.pyplot as plt
+from pathlib import Path
 
 
 # container sayısı ve arrival_rate'e müdahale ediyoruz, avg_cpu_util'i okuyoruz.
@@ -18,6 +17,8 @@ import matplotlib.pyplot as plt
 STATE_KEYS = ['num_containers', 'cpu_allocation', 'avg_cpu_util', 'workload_process_rate', 'workload_change_rate']
 # DQN'in replay memory'si için transition tanımı
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
+
+NUM_EXPERIMENTS = 1
 # Episode sayisi
 NUM_EPISODES = 1000
 # Step sayisi
@@ -196,6 +197,15 @@ class DQN:
         # donen action sıfır indeksli.
         return action, exploration
 
+    def select_greedy_action(self, state: Dict) -> Tuple[torch.Tensor, bool]:
+        with torch.no_grad():
+            # state dictionary'sini son anda normalize edip tensor'a çeviriyoruz.
+            state_tensor = state_to_tensor(normalize_state(state))
+            action = self.policy_net(state_tensor).argmax().view(1, 1)
+            exploration = False
+
+        return action, exploration
+
     def optimize_model(self):
         '''Bu kisma çok hakim değilim, siz bir goz atarsanız sevinirim.'''
 
@@ -317,7 +327,17 @@ class RLEnvironment:
         '''Her episode başında environment'ı resetliyoruz.'''
         self.num_containers = random.choice(range(MIN_NUM_CONTAINERS, MAX_NUM_CONTAINERS+1))
         self.cpu_allocation = random.choice(range(MIN_CPU_ALLOC, MAX_CPU_ALLOC+1))
-        self.workload_indx = random.randint(1, len(self.workload) - NUM_STEPS - 1)
+        self.workload_indx = random.randint(1, len(self.workload) - 1)
+
+        state= self.get_rl_states()
+
+        return state
+
+    def reset_to(self, num_containers: int, cpu_allocation: float, workload_indx: int) -> Dict:
+        '''Her episode başında environment'ı resetliyoruz.'''
+        self.num_containers = num_containers
+        self.cpu_allocation = cpu_allocation
+        self.workload_indx = workload_indx
 
         state= self.get_rl_states()
 
@@ -328,7 +348,10 @@ class RLEnvironment:
         self.num_containers = action['scale_to']
         self.cpu_allocation = action['vertical']
 
+        # rewind to first workload
         self.workload_indx += 1
+        if self.workload_indx >= len(self.workload):
+            self.workload_indx = 0
 
         # Observe the next state
         state = self.get_rl_states()
@@ -381,6 +404,136 @@ def plot_history(history, save_path = None):
         print(f'Saved reward/loss plot {save_path}')
         plt.savefig(save_path)
 
+
+def plot_multi_history(histories, save_path=None):
+    """
+    Plot average rewards and losses across multiple experiments with std shading.
+
+    Args:
+        histories (list): list of dicts with keys {'rewards', 'losses'}.
+                          Each 'rewards' and 'losses' is shaped (num_episodes, num_steps).
+        save_path (str): optional path to save the figure.
+    """
+    # Collect episode totals
+    all_rewards, all_losses = [], []
+
+    for h in histories:
+        rewards = np.sum(h['rewards'], axis=1)  # total reward per episode
+        losses = np.mean(h['losses'], axis=1)  # avg loss per episode
+        all_rewards.append(rewards)
+        all_losses.append(losses)
+
+    all_rewards = np.stack(all_rewards)  # (num_experiments, num_episodes)
+    all_losses = np.stack(all_losses)
+
+    num_experiments, num_episodes = all_rewards.shape
+
+    # Mean and std across experiments
+    mean_rewards = np.mean(all_rewards, axis=0)
+    std_rewards = np.std(all_rewards, axis=0)
+
+    mean_losses = np.mean(all_losses, axis=0)
+    std_losses = np.std(all_losses, axis=0)
+
+    # Plot
+    fig, axes = plt.subplots(nrows=2, ncols=1, sharex=True, figsize=(8, 6))
+    ax1, ax2 = axes.flatten()
+
+    # Rewards
+    ax1.set_title("Training Results Across Experiments")
+    ax1.set_ylabel("Reward")
+    ax1.plot(mean_rewards, color="tab:red", label="Mean Reward")
+    ax1.fill_between(range(num_episodes),
+                     mean_rewards - std_rewards,
+                     mean_rewards + std_rewards,
+                     color="tab:red", alpha=0.2, label="±1 std")
+    ax1.legend()
+
+    # Losses
+    ax2.set_xlabel("Episode")
+    ax2.set_ylabel("Loss")
+    ax2.plot(mean_losses, color="tab:blue", label="Mean Loss")
+    ax2.fill_between(range(num_episodes),
+                     mean_losses - std_losses,
+                     mean_losses + std_losses,
+                     color="tab:blue", alpha=0.2, label="±1 std")
+    ax2.legend()
+
+    fig.tight_layout()
+
+    if save_path:
+        file_path = Path(save_path)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"Saved reward/loss plot {save_path}")
+        plt.savefig(save_path)
+
+
+def test_policy(policy, env, n_episodes=20, metrics_to_track=["num_containers", "cpu_allocation", "avg_cpu_util", "arrival_rate", "response_time"]):
+    print("Testing the policy...")
+    episode_rewards = []
+    episode_metrics = []  # e.g., cpu_usage, response_time, etc.
+
+    for ep in range(n_episodes):
+        state = env.reset_to(num_containers=2, cpu_allocation=42, workload_indx=0)
+        rewards = []
+        metrics = []
+
+        metrics.append({m: state[m] for m in metrics_to_track})
+
+        for step in range(len(env.workload) * 3):
+            action, _ = policy.select_greedy_action(state)
+            action_to_execute = action_tensor_to_dict(action)
+            next_state, reward, done = env.step(action_to_execute)
+
+            # store metrics
+            rewards.append(reward)
+            metrics.append({m: next_state[m] for m in metrics_to_track})
+
+            state = next_state
+            if done:
+                break
+
+        episode_rewards.append(rewards)
+        episode_metrics.append(metrics)
+
+    # Convert to numpy for easier math
+    rewards_array = np.array([np.array(r) for r in episode_rewards])  # shape (episodes, steps)
+    mean_rewards = rewards_array.mean(axis=0)
+    std_rewards = rewards_array.std(axis=0)
+
+    timesteps = np.arange(rewards_array.shape[1])
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(timesteps, mean_rewards, label="Mean Reward")
+    plt.fill_between(timesteps,
+                     mean_rewards - std_rewards,
+                     mean_rewards + std_rewards,
+                     alpha=0.2, label="±1 std")
+    plt.xlabel("Timestep")
+    plt.ylabel("Reward")
+    plt.legend()
+    plt.savefig(f'../results/testing_reward_exp{NUM_EXPERIMENTS}_eps{NUM_EPISODES}.pdf')
+    plt.close()   # close figure to avoid overlap when looping
+
+    # Extract cpu_usage from metrics
+    for metric_name in metrics_to_track:
+        value_array = np.array([[m[metric_name] for m in ep] for ep in episode_metrics])
+        mean = value_array.mean(axis=0)
+        std = value_array.std(axis=0)
+
+        timesteps = np.arange(value_array.shape[1])
+
+        plt.figure(figsize=(8, 5))
+        plt.plot(timesteps, mean, label="App2Scale Agent")
+        plt.fill_between(timesteps, mean - std, mean + std, alpha=0.2)
+        plt.xlabel("Timestep")
+        plt.ylabel(metric_name)
+        plt.legend()
+        plt.savefig(f'../results/testing_{metric_name}_exp{NUM_EXPERIMENTS}_eps{NUM_EPISODES}.pdf')
+        plt.close()   # close figure to avoid overlap when looping
+
+
+
 if __name__ == "__main__":
     '''Ana programımız budur.'''
 
@@ -388,10 +541,16 @@ if __name__ == "__main__":
     np.random.seed(RANDOM_SEED)
     torch.manual_seed(RANDOM_SEED)
 
-    env = RLEnvironment()
+    episode_histories = []
+    for exp in range(NUM_EXPERIMENTS):
+        env = RLEnvironment()
 
-    agent = DQN(env, NUM_STATES, NUM_ACTIONS)
+        policy = DQN(env, NUM_STATES, NUM_ACTIONS)
 
-    history = agent.train(NUM_EPISODES, NUM_STEPS)
+        episode_history = policy.train(NUM_EPISODES, NUM_STEPS)
+        episode_histories.append(episode_history)
 
-    plot_history(history, save_path='../results/experiment04.pdf')
+        if exp == 0:
+            test_policy(policy, env)
+
+    plot_multi_history(episode_histories, save_path=f'../results/experiment04_exp{NUM_EXPERIMENTS}_eps{NUM_EPISODES}.pdf')
